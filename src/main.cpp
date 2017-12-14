@@ -12,6 +12,13 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+constexpr double MIN_STEER = -1;
+constexpr double MAX_STEER = 1;
+
+constexpr double IDLE_SPEED_CTE       = 10;
+constexpr double IDLE_SPEED_THOLD     = 1;
+constexpr int    IDLE_SPEED_MAX_TIMES = 10;
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -28,12 +35,16 @@ std::string hasData(std::string s) {
   return "";
 }
 
+int idle_speed_cntr = 0;
+
 int main()
 {
   uWS::Hub h;
 
   PID pid;
-  // TODO: Initialize the pid variable.
+  pid.Init(1.7341, 0, 6.78751);
+  //pid.startTwiddle(1e-2, 1000, 1);
+
 
   h.onMessage([&pid](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -47,26 +58,61 @@ int main()
         std::string event = j[0].get<std::string>();
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          double cte = std::stod(j[1]["cte"].get<std::string>());
+          double cte   = std::stod(j[1]["cte"].get<std::string>());
           double speed = std::stod(j[1]["speed"].get<std::string>());
           double angle = std::stod(j[1]["steering_angle"].get<std::string>());
           double steer_value;
-          /*
-          * TODO: Calcuate steering value here, remember the steering value is
-          * [-1, 1].
-          * NOTE: Feel free to play around with the throttle and speed. Maybe use
-          * another PID controller to control the speed!
-          */
-          
-          // DEBUG
-          std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
 
-          json msgJson;
-          msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = 0.3;
-          auto msg = "42[\"steer\"," + msgJson.dump() + "]";
-          std::cout << msg << std::endl;
-          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          // Check if vehicle is stuck in place from it's speed.
+          if (speed < IDLE_SPEED_THOLD) {
+            ++idle_speed_cntr;
+
+            // Set the CTE to `IDLE_SPEED_CTE` in order to increase the MSE
+            // when vehicle is stuck.
+            cte = IDLE_SPEED_CTE;
+
+            // When using twiddle, we want to stop the simulation if vehicle is stuck.
+            if (idle_speed_cntr == IDLE_SPEED_MAX_TIMES) {
+              pid.simulator_idle_speed = true;
+              std::cout << "Idle speed detected!" << std::endl;
+            }
+          } else if (idle_speed_cntr) {
+            idle_speed_cntr = 0;
+          }
+
+          pid.UpdateError(cte);
+
+          // Check if PID sent reset request to simulator.
+          if (pid.simulator_reset_request) {
+            std::string msg = "42[\"reset\",{}]";
+            ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+
+            // reset idle speed params
+            pid.simulator_idle_speed = false;
+            idle_speed_cntr = 0;
+
+            pid.simulator_reset_request = false;
+          } else {
+            steer_value = -pid.TotalError();
+
+            /* Normalize steering value to [-1, 1] by trimming
+            * values outside of limits. */
+            if (steer_value < MIN_STEER) {
+              steer_value = MIN_STEER;
+            } else if (steer_value > MAX_STEER) {
+              steer_value = MAX_STEER;
+            }
+
+            // DEBUG
+            //std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+
+            json msgJson;
+            msgJson["steering_angle"] = steer_value;
+            msgJson["throttle"] = 0.3;
+            auto msg = "42[\"steer\"," + msgJson.dump() + "]";
+            //std::cout << msg << std::endl;
+            ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          }
         }
       } else {
         // Manual driving
